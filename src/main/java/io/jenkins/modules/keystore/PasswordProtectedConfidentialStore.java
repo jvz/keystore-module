@@ -36,8 +36,6 @@ import org.kohsuke.MetaInfServices;
 import javax.annotation.CheckForNull;
 import javax.crypto.Cipher;
 import javax.crypto.CipherInputStream;
-import javax.crypto.CipherOutputStream;
-import javax.crypto.NoSuchPaddingException;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
@@ -46,15 +44,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.security.InvalidAlgorithmParameterException;
-import java.security.InvalidKeyException;
+import java.security.GeneralSecurityException;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.security.spec.InvalidParameterSpecException;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
@@ -62,8 +61,12 @@ import java.util.Collections;
 @MetaInfServices
 public class PasswordProtectedConfidentialStore extends ConfidentialStore {
 
+    // AEAD defined in RFC 5116
+    // https://www.ietf.org/rfc/rfc5116.txt
     private static final String KEY = "AES";
     private static final String CIPHER = "AES/GCM/NoPadding";
+    private static final int NONCE_SIZE = 12;
+    private static final int SALT_SIZE = 16;
 
     private final Path root;
     private final SecureRandom random;
@@ -93,6 +96,8 @@ public class PasswordProtectedConfidentialStore extends ConfidentialStore {
         char[] password;
         byte[] salt;
         Path saltFile = root.resolve("master.salt");
+        // FIXME: this salt must be regenerated at some point before we use this key 2^32 times
+        // since it's unreasonable to track how many times we've used the key, this should probably just be time-based?
         if (Files.exists(saltFile)) {
             salt = readSalt(saltFile);
             password = console.readPassword("Enter master key password to unlock Jenkins: ");
@@ -102,11 +107,12 @@ public class PasswordProtectedConfidentialStore extends ConfidentialStore {
                 password = console.readPassword("Enter new master key password to encrypt secrets: ");
             } while (!Arrays.equals(password, console.readPassword("Re-enter password: ")));
         }
+        // FIXME: this doesn't throw an error for invalid passwords until a decryption operation is attempted
         return deriveKey(password, salt);
     }
 
     private byte[] generateSalt(Path saltFile) throws IOException {
-        byte[] salt = new byte[16];
+        byte[] salt = new byte[SALT_SIZE];
         random.nextBytes(salt);
         String saltString = Base64.getEncoder().encodeToString(salt);
         Files.write(saltFile, Collections.singleton(saltString), StandardOpenOption.CREATE_NEW);
@@ -129,7 +135,7 @@ public class PasswordProtectedConfidentialStore extends ConfidentialStore {
                 .build();
         Argon2BytesGenerator generator = new Argon2BytesGenerator();
         generator.init(parameters);
-        byte[] hash = new byte[16];
+        byte[] hash = new byte[SALT_SIZE];
         generator.generateBytes(password, hash);
         return new SecretKeySpec(hash, KEY);
     }
@@ -138,17 +144,16 @@ public class PasswordProtectedConfidentialStore extends ConfidentialStore {
     protected void store(ConfidentialKey key, byte[] payload) throws IOException {
         String keyId = key.getId();
         Path keyFile = root.resolve(keyId);
-        byte[] iv = randomBytes(16);
-        GCMParameterSpec params = new GCMParameterSpec(128, iv);
+        byte[] nonce = randomBytes(NONCE_SIZE);
+        GCMParameterSpec params = new GCMParameterSpec(128, nonce);
         try (OutputStream os = Files.newOutputStream(keyFile)) {
-            os.write(iv);
+            os.write(nonce);
             Cipher cipher = Cipher.getInstance(CIPHER);
-            cipher.init(Cipher.ENCRYPT_MODE, masterKey, params, random);
+            cipher.init(Cipher.ENCRYPT_MODE, masterKey, params);
+            cipher.updateAAD(serialize(keyId.length()));
             cipher.updateAAD(keyId.getBytes(StandardCharsets.UTF_8));
-            try (CipherOutputStream out = new CipherOutputStream(os, cipher)) {
-                out.write(payload);
-            }
-        } catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e) {
+            os.write(cipher.doFinal(payload));
+        } catch (GeneralSecurityException e) {
             throw new IOException(e);
         }
     }
@@ -161,21 +166,26 @@ public class PasswordProtectedConfidentialStore extends ConfidentialStore {
         if (Files.notExists(keyFile)) {
             return null;
         }
-        byte[] iv = new byte[16];
+        byte[] nonce = new byte[NONCE_SIZE];
         try (InputStream is = Files.newInputStream(keyFile)) {
-            if (is.read(iv) != 16) {
-                throw new IOException("Cannot read IV of " + keyId);
+            if (is.read(nonce) != NONCE_SIZE) {
+                throw new InvalidParameterSpecException("Cannot read IV of " + keyId);
             }
-            GCMParameterSpec params = new GCMParameterSpec(128, iv);
+            GCMParameterSpec params = new GCMParameterSpec(128, nonce);
             Cipher cipher = Cipher.getInstance(CIPHER);
             cipher.init(Cipher.DECRYPT_MODE, masterKey, params);
+            cipher.updateAAD(serialize(keyId.length()));
             cipher.updateAAD(keyId.getBytes(StandardCharsets.UTF_8));
             try (CipherInputStream in = new CipherInputStream(is, cipher)) {
                 return IOUtils.toByteArray(in);
             }
-        } catch (NoSuchAlgorithmException | NoSuchPaddingException | InvalidKeyException | InvalidAlgorithmParameterException e) {
+        } catch (GeneralSecurityException e) {
             throw new IOException(e);
         }
+    }
+
+    private static ByteBuffer serialize(int i) {
+        return ByteBuffer.allocate(4).putInt(i).flip();
     }
 
     @Override
