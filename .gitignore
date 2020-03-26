@@ -24,3 +24,7 @@ hs_err_pid*
 
 target/
 work/
+
+# IntelliJ project files
+*.iml
+.idea/

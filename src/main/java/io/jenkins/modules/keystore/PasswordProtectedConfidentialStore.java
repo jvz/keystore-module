@@ -185,7 +185,7 @@ public class PasswordProtectedConfidentialStore extends ConfidentialStore {
     }
 
     private static ByteBuffer serialize(int i) {
-        return ByteBuffer.allocate(4).putInt(i).flip();
+        return (ByteBuffer) ByteBuffer.allocate(4).putInt(i).flip();
     }
 
     @Override

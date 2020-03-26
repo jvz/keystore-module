@@ -56,7 +56,7 @@
     <connection>scm:git:git://github.com/jvz/keystore-module.git</connection>
     <developerConnection>scm:git:git@github.com:jvz/keystore-module.git</developerConnection>
     <url>https://github.com/jvz/keystore-module</url>
-    <tag>HEAD</tag>
+    <tag>${scmTag}</tag>
   </scm>
   <repositories>
     <repository>
