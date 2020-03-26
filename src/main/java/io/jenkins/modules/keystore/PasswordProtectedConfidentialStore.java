@@ -25,6 +25,7 @@
 
 package io.jenkins.modules.keystore;
 
+import hudson.FilePath;
 import jenkins.model.Jenkins;
 import jenkins.security.ConfidentialKey;
 import jenkins.security.ConfidentialStore;
@@ -40,6 +41,7 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.Console;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -72,13 +74,14 @@ public class PasswordProtectedConfidentialStore extends ConfidentialStore {
     private final SecureRandom random;
     private final SecretKey masterKey;
 
-    public PasswordProtectedConfidentialStore() {
+    public PasswordProtectedConfidentialStore() throws InterruptedException {
+        File rootDir = Jenkins.get().getRootDir();
+        File secretsDir = new File(rootDir, "secrets");
         try {
-            root = Jenkins.get().root.toPath().resolve("secrets");
-            if (Files.notExists(root)) {
-                Files.createDirectory(root,
-                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+            if (secretsDir.mkdirs()) {
+                new FilePath(secretsDir).chmod(0700);
             }
+            root = secretsDir.toPath();
             random = SecureRandom.getInstanceStrong();
             masterKey = readKey();
         } catch (NoSuchAlgorithmException e) {
@@ -185,7 +188,7 @@ public class PasswordProtectedConfidentialStore extends ConfidentialStore {
     }
 
     private static ByteBuffer serialize(int i) {
-        return ByteBuffer.allocate(4).putInt(i).flip();
+        return (ByteBuffer) ByteBuffer.allocate(4).putInt(i).flip();
     }
 
     @Override
